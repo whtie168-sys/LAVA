@@ -1,0 +1,48 @@
+//
+//  LaAnnouncementTopView.m
+//  WildFireChat
+//
+//  Created by Ruby on 1/17/24.
+//  Copyright © 2024 WildFireChat. All rights reserved.
+//
+
+#import "LaAnnouncementTopView.h"
+
+@interface LaAnnouncementTopView ()
+
+@property (weak, nonatomic) IBOutlet UILabel *groupAnnouncementL;
+@property (weak, nonatomic) IBOutlet UIButton *iGotItL;
+
+@end
+
+
+@implementation LaAnnouncementTopView
+
+- (instancetype)init {
+    self = [super init];
+    if (self) {
+        self = [NSBundle.mainBundle loadNibNamed:@"LaAnnouncementTopView" owner:self options:nil].lastObject;
+        self.frame = CGRectMake(20.0, 0.0, WIDTH-40.0, 122.0);
+        
+        self.layer.cornerRadius = 12.0;
+        self.userInteractionEnabled = YES;
+        [self addGestureRecognizer:[[UITapGestureRecognizer alloc] initWithTarget:self action:@selector(in_details)]];
+        
+        _groupAnnouncementL.text = LLLLLL(@"GroupAnnouncement");
+        [_iGotItL setTitle:LLLLLL(@"iGotIt") forState:UIControlStateNormal];
+    }
+    return self;
+}
+
+- (void)in_details {
+    if (_popAnnouncementViewBlock) {
+        _popAnnouncementViewBlock(1);
+    }
+}
+- (IBAction)i_konw:(UIButton *)sender {
+    if (_popAnnouncementViewBlock) {
+        _popAnnouncementViewBlock(0);
+    }
+}
+
+@end

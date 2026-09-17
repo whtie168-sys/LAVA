@@ -1,0 +1,1311 @@
+//
+//  AppDelegate.m
+//  WildFireChat
+//
+//  Created by WF Chat on 2017/11/5.
+//  Copyright © 2017年 WildFireChat. All rights reserved.
+//
+
+
+//如果您不需要voip功能，请在ChatUIKit工程中关掉voip功能，然后修改WFChat-Prefix-Header.h中WFCU_SUPPORT_VOIP为0
+//ChatUIKit关闭voip的方式是，找到ChatUIKit工程下的Predefine.h头文件，定义WFCU_SUPPORT_VOIP为0，
+//再删除掉ChatUIKit工程的WebRTC和Chat86AVEngineKit的依赖。
+//删除掉应用工程中的WebRTC.framework和Chat86AVEngineKit.framework这两个库。
+
+#import "AppDelegate.h"
+#import <Contacts/Contacts.h>
+#import <LavaWFChatClient/WFCChatClient.h>
+#if WFCU_SUPPORT_VOIP
+#import <Chat86AVEngineKit/Chat86AVEngineKit.h>
+#import <WebRTC/WebRTC.h>
+#endif
+#import "LaLoginVC.h"
+#import "WFCConfig.h"
+#import "LaTabBarVC.h"
+//#import <WFChatUIKitLava/WFChatUIKit.h>
+#import <UserNotifications/UserNotifications.h>
+#import "PCLoginConfirmViewController.h"
+#import "AppService.h"
+#import "UIColor+YH.h"
+#import "SharedConversation.h"
+#import "SharePredefine.h"
+#ifdef WFC_PTT
+#import <PttClient/WFPttClient.h>
+#endif
+
+#import "OrgService.h"
+
+#if USE_CALL_KIT
+#import "WFCCallKitManager.h"
+#endif
+#import "MBProgressHUD.h"
+
+#import "LaNormalQrcodeVC.h"
+#import "LaScanQrVC.h"
+
+#import "LaNumberVC.h" // 1207
+#import "LaMemberInfoVC.h"
+#import "LaFriendInfoVC.h"
+#import "LaGroupInfoQrVC.h"
+
+#import <objc/message.h>
+#import "ProxyManager.h"
+
+#import "KeyChainTool.h"
+#import "Countly.h"
+
+@interface AppDelegate () <ConnectionStatusDelegate, ConnectToServerDelegate, ReceiveMessageDelegate,
+#if WFCU_SUPPORT_VOIP
+    WFAVEngineDelegate,
+#endif
+    UNUserNotificationCenterDelegate, QrCodeDelegate
+#ifdef WFC_PTT
+,WFPttDelegate
+#endif
+>{
+    BOOL _isChinese;
+}
+@property(nonatomic, strong) AVAudioPlayer *audioPlayer;
+@property(nonatomic, strong) UILocalNotification *localCallNotification;
+#if USE_CALL_KIT
+@property(nonatomic, strong) WFCCallKitManager *callKitManager;
+#endif
+
+@property(nonatomic, assign) BOOL firstConnected;
+@end
+
+@implementation AppDelegate
+- (BOOL)application:(UIApplication *)application didFinishLaunchingWithOptions:(NSDictionary *)launchOptions {
+    [self startAppsFlyer];
+#if DEBUG
+    if([IM_SERVER_HOST rangeOfString:@"http"].location != NSNotFound || [IM_SERVER_HOST rangeOfString:@":"].location != NSNotFound) {
+        NSLog(@"IM_SERVER_HOST只能填写IP或者域名，不能带HTTP头或者端口！！！");
+        exit(-1);
+    }
+#endif
+    _isChinese = [CommonHelper.main isChinese];
+#if WFCU_SUPPORT_VOIP
+#if !USE_CALL_KIT
+    [Chat86AVEngineKit notRegisterVoipPushService];
+#endif
+#endif
+    [WFCCNetworkService sharedInstance].sendLogCommand = Send_Log_Command;
+    [WFCCNetworkService startLog];
+//    [[WFCCNetworkService sharedInstance] useSM4];
+    [WFCCNetworkService sharedInstance].connectionStatusDelegate = self;
+    [WFCCNetworkService sharedInstance].connectToServerDelegate = self;
+    [WFCCNetworkService sharedInstance].receiveMessageDelegate = self;
+    [[WFCCNetworkService sharedInstance] setServerAddress:IM_SERVER_HOST];
+    [[WFCCNetworkService sharedInstance] setBackupAddressStrategy:0];
+    [WFCCNetworkService sharedInstance].defaultPortraitProvider = [AppService sharedAppService];
+//    [[WFCCNetworkService sharedInstance] setProxyInfo:nil ip:@"192.168.1.80" port:1080 username:nil password:nil];
+//    [[WFCCNetworkService sharedInstance] setBackupAddress:@"192.168.1.120" port:80];
+    [[NSNotificationCenter defaultCenter] addObserver:self selector:@selector(onFriendRequestUpdated:) name:kFriendRequestUpdated object:nil];
+    
+    //当PC/Web在线时手机端是否静音，默认静音。如果修改为默认不静音，需要打开下面函数。
+    //另外需要IM服务配置server.mobile_default_silent_when_pc_online为false。必须保持与服务器同步。
+    //[[WFCCIMService sharedWFCIMService] setDefaultSilentWhenPcOnline:NO];
+
+#if WFCU_SUPPORT_VOIP
+    //多人音视频通话时，是否在会话中现在正在通话让其他人主动加入。
+    [QWERConfigManager globalManager].enableMultiCallAutoJoin = YES;
+    
+    //多人音视频通话时，是否在显示谁在说话
+    [QWERConfigManager globalManager].displaySpeakingInMultiCall = YES;
+    
+    //音视频高级版不需要stun/turn服务，请注释掉下面这行。单人版和多人版需要turn服务，请自己部署然后修改配置文件。
+    [[Chat86AVEngineKit sharedEngineKit] addIceServer:ICE_ADDRESS userName:ICE_USERNAME password:ICE_PASSWORD];
+    
+    [[Chat86AVEngineKit sharedEngineKit] setVideoProfile:kWFAVVideoProfile480P swapWidthHeight:YES];
+    [Chat86AVEngineKit sharedEngineKit].delegate = self;
+    
+    // 设置音视频参与者数量。多人音视频默认视频4路，音频9路，如果改成更多可能会导致问题；音视频高级版默认视频9路，音频16路。
+//    [Chat86AVEngineKit sharedEngineKit].maxVideoCallCount = 4;
+//    [Chat86AVEngineKit sharedEngineKit].maxAudioCallCount = 9;
+    
+    //音视频日志，当需要抓日志分析时可以打开这句话
+    //RTCSetMinDebugLogLevel(RTCLoggingSeverityInfo);
+#endif
+    
+    
+    [QWERConfigManager globalManager].appServiceProvider = [AppService sharedAppService];
+    [QWERConfigManager globalManager].fileTransferId = FILE_TRANSFER_ID;
+    [QWERConfigManager globalManager].orgServiceProvider = [OrgService sharedOrgService];
+#ifdef WFC_PTT
+    //初始化对讲SDK
+    [WFPttClient sharedClient].delegate = self;
+    BOOL keepBackgroundAlive = [[NSUserDefaults standardUserDefaults] boolForKey:@"WFC_PTT_BACKGROUND_KEEPALIVE"];
+    if(keepBackgroundAlive) {
+        [[WFPttClient sharedClient] setPlaySilent:@(YES)];
+    }
+    BOOL pttEnabled = [[NSUserDefaults standardUserDefaults] boolForKey:@"WFC_PTT_ENABLED"];
+    [WFPttClient sharedClient].enablePtt = pttEnabled;
+#endif //WFC_PTT
+        
+    [self setupNavBar];
+    self.window.backgroundColor = [UIColor whiteColor];
+    
+    setQrCodeDelegate(self);
+    
+    UIRemoteNotificationTypeSound;
+    if (@available(iOS 10.0, *)) {
+        //第一步：获取推送通知中心
+        UNUserNotificationCenter *center = [UNUserNotificationCenter currentNotificationCenter];
+        center.delegate = self;
+        [center requestAuthorizationWithOptions:(UNAuthorizationOptionAlert|UNAuthorizationOptionSound|UNAuthorizationOptionBadge)
+                              completionHandler:^(BOOL granted, NSError * _Nullable error) {
+                                  if (!error) {
+                                      NSLog(@"succeeded!");
+                                      dispatch_async(dispatch_get_main_queue(), ^{
+                                          [application registerForRemoteNotifications];
+                                      });
+                                  }
+                              }];
+    } else {
+        UIUserNotificationSettings *settings = [UIUserNotificationSettings
+                                                settingsForTypes:(UIUserNotificationTypeBadge |
+                                                                  UIUserNotificationTypeSound |
+                                                                  UIUserNotificationTypeAlert)
+                                                categories:nil];
+        [application registerUserNotificationSettings:settings];
+    }
+    
+    /**
+     C7132C3F-1744-42C0-B8CA-50ACFC3F91AB    iPhone 15 Plus
+     BE5E8DFD-F5E5-4E29-9AB7-C9068B967543   iPhone 15
+     
+     */
+    // 我的-安全设置-设备  登录/注册时上报给服务端
+    NSString *saveUUID = (NSString *)[KeyChainTool readData:kUUIDStringValue];
+    if (saveUUID == nil || saveUUID.length <= 0) { // 说明未保存该数据
+        NSString *UUID = [UIDevice.currentDevice.identifierForVendor UUIDString];
+        [KeyChainTool saveData:UUID withIdentifier:kUUIDStringValue];
+    }
+    
+    // 0 跟随系统   1 中文   2 英文(越南文)
+    [NSUserDefaults.standardUserDefaults setInteger:2 forKey:@"CurrentLanguage"];
+    [NSUserDefaults.standardUserDefaults synchronize];
+    if (LockStatusManager.main.lockStatus.status == 1) { // 如果设置了安全锁
+        [LockStatusManager.main reWriteLockInfo:@(0) ForKey:@"backgroundTime"];
+        LaNumberVC *vc = LaNumberVC.new;
+        vc.type = 4;
+        WS(weakself)
+        [vc setPswBlock:^(NSString * _Nonnull psw) {
+            if ([psw isEqualToString:@"OK"]) {
+                [weakself enterProject];
+            }else if ([psw isEqualToString:@"ACCOUNT"]) { // 切换账号
+                [weakself enterLogin];
+            }else if ([psw isEqualToString:@"FORGET"]) { // 成功清除聊天数据后的回调
+                [weakself enterLogin];
+            }
+        }];
+        UINavigationController *nav = [[UINavigationController alloc] initWithRootViewController:vc];
+        self.window.rootViewController = nav;
+    }else {
+        [self enterProject];
+    }
+    
+//    NSString *savedToken = [[NSUserDefaults standardUserDefaults] stringForKey:@"savedToken"];
+//    NSString *savedUserId = [[NSUserDefaults standardUserDefaults] stringForKey:@"savedUserId"];
+//    if (savedToken.length > 0 && savedUserId.length > 0) {
+//        //需要注意token跟clientId是强依赖的，一定要调用getClientId获取到clientId，然后用这个clientId获取token，这样connect才能成功，如果随便使用一个clientId获取到的token将无法链接成功。另外不能多次connect，如果需要切换用户请先disconnect，然后3秒钟之后再connect（如果是用户手动登录可以不用等，因为用户操作很难3秒完成，如果程序自动切换请等3秒）。
+//        [[WFCCNetworkService sharedInstance] connect:savedUserId token:savedToken];
+//        self.window.rootViewController = [LaTabBarVC new];
+//    } else {
+//        LaLoginVC *loginVC = [[LaLoginVC alloc] init];
+//
+//        //是否优先密码登录
+//        loginVC.isPwdLogin = Prefer_Password_Login;
+//        UINavigationController *nav = [[UINavigationController alloc] initWithRootViewController:loginVC];
+//        self.window.rootViewController = nav;
+//    }
+    
+#if USE_CALL_KIT
+    self.callKitManager = [[WFCCallKitManager alloc] init];
+#endif
+    
+//    [self requestAuthorizationForAddressBook];
+    [CommonHelper.main updateAppSuccess:^(BOOL isUpdate) {
+    }];
+    
+    [SVProgressHUD setDefaultMaskType:SVProgressHUDMaskTypeClear]; // 0206 不允许用户与后台对象交互
+    if ([NSUserDefaults.standardUserDefaults integerForKey:@"kFontSize"] <= 0) {
+        [NSUserDefaults.standardUserDefaults setInteger:14 forKey:@"kFontSize"];
+        [NSUserDefaults.standardUserDefaults synchronize];
+        [[WFCCIMService sharedWFCIMService] setEnableSyncDraft:NO success:^{
+        }error:^(int error_code) {
+        }];
+    }
+
+    /** 推送通知 故障报告 自动视图跟踪
+        CLYPushNotifications
+        CLYCrashReporting
+        CLYAutoViewTracking */
+    CountlyConfig *config = CountlyConfig.new;
+    config.appKey = @"75b6c7c0285637e00bebcfe185d5d9765e25445e";
+    config.host = @"http://ec2-54-254-43-61.ap-southeast-1.compute.amazonaws.com:9090"; // http://api.866chat.com:9090
+    config.enableAutomaticViewTracking = true;
+    config.features = @[CLYPushNotifications, CLYCrashReporting];
+    [Countly.sharedInstance startWithConfig:config];
+    [Countly.sharedInstance askForNotificationPermission];
+    return YES;
+}
+
+- (void)startAppsFlyer {
+//    [[AppsFlyerLib shared] setAppsFlyerDevKey:@"avpPJwAgn4syfqXhYW7ZbR"];
+//    [[AppsFlyerLib shared] setAppleAppID:@"6738809760"];
+}
+
+- (void)enterProject {
+    NSString *savedToken = [[NSUserDefaults standardUserDefaults] stringForKey:@"savedToken"];
+    NSString *savedUserId = [[NSUserDefaults standardUserDefaults] stringForKey:@"savedUserId"];
+    
+    if (savedToken.length > 0 && savedUserId.length > 0) {
+        
+#if TARGET_IPHONE_SIMULATOR//模拟器
+
+#elif TARGET_OS_IPHONE//真机
+    NSString *proxy = [ProxyManager.main getProxyStatus];
+    if (proxy.length > 0 || proxy != nil) {
+        UIAlertController * alertController = [UIAlertController alertControllerWithTitle:(_isChinese?@"网络异常，请检查是否开启代理":@"The network is abnormal. Check whether the proxy is enabled") message:nil preferredStyle:UIAlertControllerStyleAlert];
+        UIAlertAction *cancelAction = [UIAlertAction actionWithTitle:LLLLLL(@"AlertButton") style:UIAlertActionStyleCancel handler:^(UIAlertAction * _Nonnull action) {
+        }];
+        [alertController addAction:cancelAction];
+        [UIApplication.sharedApplication.delegate.window.rootViewController presentViewController:alertController animated:YES completion:nil];
+        return ;
+    }
+#endif
+        
+        //需要注意token跟clientId是强依赖的，一定要调用getClientId获取到clientId，然后用这个clientId获取token，这样connect才能成功，如果随便使用一个clientId获取到的token将无法链接成功。另外不能多次connect，如果需要切换用户请先disconnect，然后3秒钟之后再connect（如果是用户手动登录可以不用等，因为用户操作很难3秒完成，如果程序自动切换请等3秒）。
+        [[WFCCNetworkService sharedInstance] connect:savedUserId token:savedToken];
+        self.window.rootViewController = [LaTabBarVC new];
+        
+    } else {
+        [self enterLogin];
+    }
+}
+- (void)enterLogin {
+    LaLoginVC *loginVC = [[LaLoginVC alloc] init];
+    //是否优先密码登录
+    loginVC.isPwdLogin = Prefer_Password_Login;
+    UINavigationController *nav = [[UINavigationController alloc] initWithRootViewController:loginVC];
+    self.window.rootViewController = nav;
+}
+
+// 程序进入后台
+- (void)applicationDidEnterBackground:(UIApplication *)application {
+    [self updateBadgeNumber];
+    [self prepardDataForShareExtension];
+}
+// 程序回到app
+- (void)applicationWillEnterForeground:(UIApplication *)application {
+    
+}
+
+- (void)requestAuthorizationForAddressBook {
+    CNAuthorizationStatus authorizationStatus = [CNContactStore authorizationStatusForEntityType:CNEntityTypeContacts];
+    if (authorizationStatus == CNAuthorizationStatusNotDetermined) {
+        [CNContactStore.new requestAccessForEntityType:CNEntityTypeContacts completionHandler:^(BOOL granted, NSError * _Nullable error) {
+            if (granted) {
+                [CommonHelper.main getMyAddressBook];
+            }else {
+                NSLog(@"授权失败===error=%@", error);
+            }
+        }];
+    }else {
+        [CommonHelper.main getMyAddressBook];
+    }
+}
+
+- (void)application:(UIApplication *)application didRegisterUserNotificationSettings:(UIUserNotificationSettings *)notificationSettings {
+    // register to receive notifications
+    [application registerForRemoteNotifications];
+}
+
+//会议需要支持方向旋转
+-(UIInterfaceOrientationMask)application:(UIApplication *)application supportedInterfaceOrientationsForWindow:(UIWindow *)window {
+    if([NSStringFromClass([window.rootViewController class]) isEqualToString:@"RADCOConferenceVC"]) {
+        return UIInterfaceOrientationMaskPortrait | UIInterfaceOrientationMaskLandscapeLeft | UIInterfaceOrientationMaskLandscapeRight;
+    }
+    return UIInterfaceOrientationMaskPortrait;
+}
+
+- (void)application:(UIApplication *)application didRegisterForRemoteNotificationsWithDeviceToken:(NSData *)deviceToken {
+    if ([deviceToken isKindOfClass:[NSData class]]) {
+        const unsigned *tokenBytes = [deviceToken bytes];
+        NSString *hexToken = [NSString stringWithFormat:@"%08x%08x%08x%08x%08x%08x%08x%08x",
+                              ntohl(tokenBytes[0]), ntohl(tokenBytes[1]), ntohl(tokenBytes[2]),
+                              ntohl(tokenBytes[3]), ntohl(tokenBytes[4]), ntohl(tokenBytes[5]),
+                              ntohl(tokenBytes[6]), ntohl(tokenBytes[7])];
+        [[WFCCNetworkService sharedInstance] setDeviceToken:hexToken]; // 80fd06c74dccd54584e8269f8bad380dc813f2b01613dfbe196b5237156ffce4
+    } else {
+        NSString *token = [[[[deviceToken description] stringByReplacingOccurrencesOfString:@"<"
+                                                                                 withString:@""]
+                            stringByReplacingOccurrencesOfString:@">"
+                            withString:@""]
+                           stringByReplacingOccurrencesOfString:@" "
+                           withString:@""];
+        
+        [[WFCCNetworkService sharedInstance] setDeviceToken:token];
+    }
+}
+
+- (void)applicationWillResignActive:(UIApplication *)application {
+    // Sent when the application is about to move from active to inactive state. This can occur for certain types of temporary interruptions (such as an incoming phone call or SMS message) or when the user quits the application and it begins the transition to the background state.
+    // Use this method to pause ongoing tasks, disable timers, and invalidate graphics rendering callbacks. Games should use this method to pause the game.
+}
+
+
+
+- (void)applicationDidBecomeActive:(UIApplication *)application {
+//    [AppsFlyerLib shared].isDebug = true;
+//    [[AppsFlyerLib shared] start];
+    // Restart any tasks that were paused (or not yet started) while the application was inactive. If the application was previously in the background, optionally refresh the user interface.
+}
+
+
+- (void)applicationWillTerminate:(UIApplication *)application {
+    // Called when the application is about to terminate. Save data if appropriate. See also applicationDidEnterBackground:.
+    [WFCCNetworkService stopLog];
+}
+
+- (void)prepardDataForShareExtension {
+    NSUserDefaults *sharedDefaults = [[NSUserDefaults alloc] initWithSuiteName:WFC_SHARE_APP_GROUP_ID];//此处id要与开发者中心创建时一致
+        
+    //1. 保存app cookies
+    NSString *authToken = [[AppService sharedAppService] getAppServiceAuthToken];
+    if(authToken.length) {
+        [sharedDefaults setObject:authToken forKey:WFC_SHARE_APPSERVICE_AUTH_TOKEN];
+    } else {
+        NSData *cookiesdata = [[AppService sharedAppService] getAppServiceCookies];
+        if([cookiesdata length]) {
+            NSArray *cookies = [NSKeyedUnarchiver unarchiveObjectWithData:cookiesdata];
+            NSHTTPCookie *cookie;
+            for (cookie in cookies) {
+                [[NSHTTPCookieStorage sharedCookieStorageForGroupContainerIdentifier:WFC_SHARE_APP_GROUP_ID] setCookie:cookie];
+            }
+        } else {
+            NSArray *cookies = [[NSHTTPCookieStorage sharedCookieStorageForGroupContainerIdentifier:WFC_SHARE_APP_GROUP_ID] cookiesForURL:[NSURL URLWithString:APP_SERVER_ADDRESS]];
+            for (NSHTTPCookie *cookie in cookies) {
+                [[NSHTTPCookieStorage sharedCookieStorageForGroupContainerIdentifier:WFC_SHARE_APP_GROUP_ID] deleteCookie:cookie];
+            }
+        }
+    }
+    
+    //2. 保存会话列表
+    NSArray<WFCCConversationInfo*> *infos = [[WFCCIMService sharedWFCIMService] getConversationInfos:@[@(Single_Type), @(Group_Type), @(Channel_Type)] lines:@[@(0)]];
+    NSMutableArray<SharedConversation *> *sharedConvs = [[NSMutableArray alloc] init];
+    NSMutableArray<NSString *> *needComposedGroupIds = [[NSMutableArray alloc] init];
+    //最多保存200个会话，再多就没有意义
+    for (int i = 0; i < MIN(infos.count, 200); ++i) {
+        WFCCConversationInfo *info = infos[i];
+        SharedConversation *sc = [SharedConversation from:(int)info.conversation.type target:info.conversation.target line:info.conversation.line];
+        if (info.conversation.type == Single_Type) {
+            WFCCUserInfo *userInfo = [[WFCCIMService sharedWFCIMService] getUserInfo:info.conversation.target refresh:NO];
+            if (!userInfo) {
+                continue;
+            }
+            sc.title = userInfo.friendAlias.length ? userInfo.friendAlias : userInfo.displayName;
+            sc.portraitUrl = userInfo.portrait;
+        } else if (info.conversation.type == Group_Type) {
+            WFCCGroupInfo *groupInfo = [[WFCCIMService sharedWFCIMService] getGroupInfo:info.conversation.target refresh:NO];
+            if (!groupInfo) {
+                continue;
+            }
+            sc.title = groupInfo.displayName;
+            sc.portraitUrl = groupInfo.portrait;
+            if (!groupInfo.portrait.length) {
+                [needComposedGroupIds addObject:info.conversation.target];
+            }
+        } else if (info.conversation.type == Channel_Type) {
+            WFCCChannelInfo *ci = [[WFCCIMService sharedWFCIMService] getChannelInfo:info.conversation.target refresh:NO];
+            if (!ci) {
+                continue;
+            }
+            sc.title = ci.name;
+            sc.portraitUrl = ci.portrait;
+        }
+        [sharedConvs addObject:sc];
+    }
+    [sharedDefaults setObject:[NSKeyedArchiver archivedDataWithRootObject:sharedConvs] forKey:WFC_SHARE_BACKUPED_CONVERSATION_LIST];
+    
+    //3. 保存群拼接头像
+    //获取分组的共享目录
+    NSURL *groupURL = [[NSFileManager defaultManager] containerURLForSecurityApplicationGroupIdentifier:WFC_SHARE_APP_GROUP_ID];//此处id要与开发者中心创建时一致
+    NSURL *portraitURL = [groupURL URLByAppendingPathComponent:WFC_SHARE_BACKUPED_GROUP_GRID_PORTRAIT_PATH];
+    BOOL isDir = NO;
+    if(![[NSFileManager defaultManager] fileExistsAtPath:portraitURL.path isDirectory:&isDir]) {
+        NSError *error = nil;
+        if(![[NSFileManager defaultManager] createDirectoryAtPath:portraitURL.path withIntermediateDirectories:YES attributes:nil error:&error]) {
+            NSLog(@"Error, cannot create group portrait folder for share extension");
+            return;
+        }
+    } else {
+        if(!isDir) {
+            NSLog(@"Error, cannot create group portrait folder for share extension");
+            return;
+        }
+    }
+    int syncPortraitCount = 0;
+    for (NSString *groupId in needComposedGroupIds) {
+        //获取已经拼接好的头像，如果没有拼接会返回为空
+        NSString *file = [WFCCUtilities getGroupGridPortrait:groupId width:80 generateIfNotExist:NO defaultUserPortrait:^UIImage *(NSString *userId) {
+            return nil;
+        }];
+        
+        if (file.length) {
+            NSURL *fileURL = [portraitURL URLByAppendingPathComponent:groupId];
+            
+            BOOL needSync = NO;
+            if([[NSFileManager defaultManager] fileExistsAtPath:fileURL.path]) {
+                NSDictionary* extensionPortraitAttribs = [[NSFileManager defaultManager] attributesOfItemAtPath:fileURL.path error:nil];
+                NSDate *extensionPortraitDate = [extensionPortraitAttribs objectForKey:NSFileCreationDate];
+                
+                NSDictionary* containerPortraitAttribs = [[NSFileManager defaultManager] attributesOfItemAtPath:file error:nil];
+                NSDate *containerPortraitDate = [containerPortraitAttribs objectForKey:NSFileCreationDate];
+                needSync = extensionPortraitDate.timeIntervalSince1970 < containerPortraitDate.timeIntervalSince1970;
+            } else {
+                needSync = YES;
+            }
+            
+            if(needSync) {
+                syncPortraitCount++;
+                NSData *data = [NSData dataWithContentsOfFile:file];
+                [data writeToURL:fileURL atomically:YES];
+                //群组头像每次同步30个，太多影响性能
+                if(syncPortraitCount > 30) {
+                    break;
+                }
+            }
+        }
+    }
+}
+
+- (void)onFriendRequestUpdated:(NSNotification *)notification {
+    if ([UIApplication sharedApplication].applicationState == UIApplicationStateBackground) {
+        NSArray<NSString *> *newRequests = notification.object;
+        
+        if (!newRequests.count) {
+            return;
+        }
+        
+        UILocalNotification *localNote = [[UILocalNotification alloc] init];
+        if (@available(iOS 8.2, *)) {
+            localNote.alertTitle = (_isChinese?@"收到好友邀请":@"Receive a Friend invitation");
+        }
+        
+        if (newRequests.count == 1) {
+            [[WFCCIMService sharedWFCIMService] getUserInfo:newRequests[0] refresh:NO success:^(WFCCUserInfo *userInfo) {
+                dispatch_async(dispatch_get_main_queue(), ^{
+                    WFCCFriendRequest *request = [[WFCCIMService sharedWFCIMService] getFriendRequest:newRequests[0] direction:1];
+                    localNote.alertBody = [NSString stringWithFormat:@"%@:%@", (userInfo.friendAlias.length > 0 ? userInfo.friendAlias : userInfo.displayName), request.reason];
+                    [[UIApplication sharedApplication] scheduleLocalNotification:localNote];
+                });
+                        } error:^(int errorCode) {
+                            
+                        }];
+        } else if(newRequests.count > 1) {
+            if (_isChinese) {
+                localNote.alertBody = [NSString stringWithFormat:@"您收到 %ld 条好友请求", newRequests.count];
+            }else {
+                localNote.alertBody = [NSString stringWithFormat:@"You received %ld friend requests", newRequests.count];
+            }
+            [[UIApplication sharedApplication] scheduleLocalNotification:localNote];
+        }
+    }
+}
+
+- (BOOL)shouldMuteNotification {
+    BOOL isNoDisturbing = [[WFCCIMService sharedWFCIMService] isNoDisturbing];
+    
+    
+    //免打扰
+    if (isNoDisturbing) {
+        return YES;
+    }
+    
+    //全局静音
+    if ([[WFCCIMService sharedWFCIMService] isGlobalSilent]) {
+        return YES;
+    }
+    
+    WFCCUserInfo *userInfo = [WFCCIMService.sharedWFCIMService getUserInfo:WFCCNetworkService.sharedInstance.userId refresh:NO];
+    if ([UserExtraInfo mj_objectWithKeyValues:userInfo.extra].sound == 0) { // 0130 添加
+        return YES;
+    }
+    
+    BOOL pcOnline = [[WFCCIMService sharedWFCIMService] getPCOnlineInfos].count > 0;
+    BOOL muteWhenPcOnline = [[WFCCIMService sharedWFCIMService] isMuteNotificationWhenPcOnline];
+    
+    if(pcOnline && muteWhenPcOnline) {
+        return YES;
+    }
+    
+    return NO;
+}
+
+- (void)onReceiveMessage:(NSArray<WFCCMessage *> *)messages hasMore:(BOOL)hasMore {
+    if ([UIApplication sharedApplication].applicationState == UIApplicationStateBackground) {
+        NSInteger count = [self updateBadgeNumber];
+        
+        if([self shouldMuteNotification]) {
+            return;
+        }
+        
+        for (WFCCMessage *msg in messages) {
+            [self notificationForMessage:msg badgeCount:count];
+        }
+        
+    } else if([UIApplication sharedApplication].applicationState == UIApplicationStateActive) {
+        WFCCPCLoginRequestMessageContent *pcLoginRequest;
+        for (WFCCMessage *msg in messages) {
+            if (([[NSDate date] timeIntervalSince1970] - (msg.serverTime - [WFCCNetworkService sharedInstance].serverDeltaTime)/1000) < 60) {
+                if ([msg.content isKindOfClass:[WFCCPCLoginRequestMessageContent class]]) {
+                    pcLoginRequest = (WFCCPCLoginRequestMessageContent *)msg.content;
+                }
+            }
+        }
+        if (pcLoginRequest) {
+            __block UINavigationController *nav;
+            if ([self.window.rootViewController isKindOfClass:[UINavigationController class]]) {
+                nav = (UINavigationController *)self.window.rootViewController;
+            } else if ([self.window.rootViewController isKindOfClass:[UITabBarController class]]) {
+                UITabBarController *tab = (UITabBarController *)self.window.rootViewController;
+                [tab.viewControllers enumerateObjectsUsingBlock:^(__kindof UIViewController * _Nonnull obj, NSUInteger idx, BOOL * _Nonnull stop) {
+                    if ([obj isKindOfClass:[UINavigationController class]]) {
+                        nav = obj;
+                        *stop = YES;
+                    }
+                }];
+            }
+            
+            if (nav) {
+                PCLoginConfirmViewController *vc2 = [[PCLoginConfirmViewController alloc] init];
+                vc2.sessionId = pcLoginRequest.sessionId;
+                vc2.platform = pcLoginRequest.platform;
+                vc2.modalPresentationStyle = UIModalPresentationFullScreen;
+                [self.window.rootViewController presentViewController:vc2 animated:YES completion:nil];
+            } else {
+                NSLog(@"怎么样才能模态弹出PC登录确认画面呢？");
+            }
+            
+        }
+    }
+}
+// 该方法是收到消息后的推送推送 applicationIconBadgeNumber
+- (void)notificationForMessage:(WFCCMessage *)msg badgeCount:(NSInteger)count {
+    //当在后台活跃时收到新消息，需要弹出本地通知。有一种可能时客户端已经收到远程推送，然后由于voip/backgroud fetch在后台拉活了应用，此时会收到接收下来消息，因此需要避免重复通知
+//    if (([[NSDate date] timeIntervalSince1970] - (msg.serverTime - [WFCCNetworkService sharedInstance].serverDeltaTime)/1000) > 3) {
+//        return;
+//    }
+    
+    if (msg.direction == MessageDirection_Send) {
+        return;
+    } 
+    
+    // NO 是开启  YES 为关闭 0730
+    if ([NSUserDefaults.standardUserDefaults boolForKey:kIsAllowNotification] == YES ||
+        [NSUserDefaults.standardUserDefaults boolForKey:kSuspensionNotice] == YES) {
+        return; // 有其中一个为关闭状态，则不允许通知 0730
+    }
+    
+    int flag = (int)[msg.content.class performSelector:@selector(getContentFlags)];
+    WFCCConversationInfo *info = [[WFCCIMService sharedWFCIMService] getConversationInfo:msg.conversation];
+    if(((flag & 0x03) || [msg.content isKindOfClass:[WFCCRecallMessageContent class]]) && !info.isSilent && ![msg.content isKindOfClass:[WFCCCallStartMessageContent class]]) {
+
+      UILocalNotification *localNote = [[UILocalNotification alloc] init];
+        if([[WFCCIMService sharedWFCIMService] isHiddenNotificationDetail] && ![msg.content isKindOfClass:[WFCCRecallMessageContent class]]) {
+            localNote.alertBody = (_isChinese?@"您收到了新消息":@"You have received a new message");
+        } else {
+            localNote.alertBody = [msg digest];
+        }
+
+        if(msg.conversation.type == SecretChat_Type) {
+            localNote.alertBody = (_isChinese?@"您收到了新的密聊消息":@"You have received a new secret chat message");
+        }
+      if (msg.conversation.type == Single_Type) {
+        WFCCUserInfo *sender = [[WFCCIMService sharedWFCIMService] getUserInfo:msg.conversation.target refresh:NO];
+        if (sender.displayName) {
+            if (@available(iOS 8.2, *)) {
+                if ([[WFCCIMService sharedWFCIMService] isHiddenNotificationDetail]) { // 是否隐藏推送详情
+                    
+                }else {
+                    localNote.alertTitle = sender.displayName;
+                }
+            } else {
+                // Fallback on earlier versions
+            }
+        }
+      } else if(msg.conversation.type == Group_Type) {
+          WFCCGroupInfo *group = [[WFCCIMService sharedWFCIMService] getGroupInfo:msg.conversation.target refresh:NO];
+          WFCCUserInfo *sender = [[WFCCIMService sharedWFCIMService] getUserInfo:msg.fromUser refresh:NO];
+          if (sender.displayName && group.displayName) {
+              if (@available(iOS 8.2, *)) {
+                  if ([[WFCCIMService sharedWFCIMService] isHiddenNotificationDetail]) {
+                      
+                  }else {
+                      localNote.alertTitle = [NSString stringWithFormat:@"%@@%@:", sender.displayName, group.displayName];
+                  }
+              } else {
+                  // Fallback on earlier versions
+              }
+          }else if (sender.displayName) {
+              if (@available(iOS 8.2, *)) {
+                  if ([[WFCCIMService sharedWFCIMService] isHiddenNotificationDetail]) {
+                      
+                  }else {
+                      localNote.alertTitle = sender.displayName;
+                  }
+              } else {
+                  // Fallback on earlier versions
+              }
+          }
+          if (msg.status == Message_Status_Mentioned || msg.status == Message_Status_AllMentioned) {
+              if (sender.displayName) {
+                  if (_isChinese) {
+                      localNote.alertBody = [NSString stringWithFormat:@"%@在群里@了你", sender.displayName];
+                  }else {
+                      localNote.alertBody = [NSString stringWithFormat:@"%@ @ in the group of you", sender.displayName];
+                  }
+              } else {
+                  if (_isChinese) {
+                      localNote.alertBody = @"有人在群里@了你";
+                  }else {
+                      localNote.alertBody = @"Someone in the group @you";
+                  }
+              }
+                  
+          }
+      } else if (msg.conversation.type == SecretChat_Type) {
+          NSString *userId = [[WFCCIMService sharedWFCIMService] getSecretChatInfo:msg.conversation.target].userId;
+          WFCCUserInfo *sender = [[WFCCIMService sharedWFCIMService] getUserInfo:userId refresh:NO];
+          if (sender.displayName) {
+              if (@available(iOS 8.2, *)) {
+                  localNote.alertTitle = sender.displayName;
+              } else {
+                  // Fallback on earlier versions
+              }
+          }
+      } else if(msg.conversation.type == Channel_Type) {
+          WFCCChannelInfo *channelInfo = [[WFCCIMService sharedWFCIMService] getChannelInfo:msg.conversation.target refresh:NO];
+          localNote.alertTitle = channelInfo.name;
+      }
+        if ([NSUserDefaults.standardUserDefaults boolForKey:kDesktopCornerMark] == YES) { // NO 是开启  YES 为关闭 0730 关闭了角标
+            localNote.applicationIconBadgeNumber = 0;
+        }else {
+            localNote.applicationIconBadgeNumber = count;
+        }
+        localNote.userInfo = @{@"conversationType" : @(msg.conversation.type), @"conversationTarget" : msg.conversation.target, @"conversationLine" : @(msg.conversation.line), @"messageUid":@(msg.messageUid) };
+    
+      
+        dispatch_async(dispatch_get_main_queue(), ^{
+          [[UIApplication sharedApplication] scheduleLocalNotification:localNote];
+        });
+    }
+}
+// delegate 未读数量
+- (NSInteger)updateBadgeNumber {
+    // NO 是开启  YES 为关闭 0730
+    if ([NSUserDefaults.standardUserDefaults boolForKey:kIsAllowNotification] == YES ||
+        [NSUserDefaults.standardUserDefaults boolForKey:kDesktopCornerMark] == YES) { // 有其中一个为关闭状态，则不显示桌面角标0730
+        
+        [UIApplication sharedApplication].applicationIconBadgeNumber = 0;
+        return 0;
+    }
+    WFCCUnreadCount *unreadCount = [[WFCCIMService sharedWFCIMService] getUnreadCount:@[@(Single_Type), @(Group_Type), @(Channel_Type), @(SecretChat_Type)] lines:@[@(0)]];
+    int unreadFriendRequest = [[WFCCIMService sharedWFCIMService] getUnreadFriendRequestStatus];
+//    WFCCUnreadCount *messagePayload = [[WFCCIMService sharedWFCIMService] getUnreadCount:[WFCCConversation conversationWithType:Single_Type target:@"MessagePayload" line:0]];
+    
+    int count = unreadCount.unread + unreadFriendRequest;
+    [UIApplication sharedApplication].applicationIconBadgeNumber = count;
+    return count;
+}
+
+- (void)onRecallMessage:(long long)messageUid {
+    [self cancelNotification:messageUid];
+    NSInteger count = [self updateBadgeNumber];
+    
+    if ([UIApplication sharedApplication].applicationState == UIApplicationStateBackground) {
+        if([self shouldMuteNotification]) {
+            return;
+        }
+        WFCCMessage *msg = [[WFCCIMService sharedWFCIMService] getMessageByUid:messageUid];
+        if(msg) {
+            [self notificationForMessage:msg badgeCount:count];
+        }
+    }
+}
+
+- (void)onDeleteMessage:(long long)messageUid {
+    [self cancelNotification:messageUid];
+    [self updateBadgeNumber];
+}
+
+- (BOOL)cancelNotification:(long long)messageUid {
+    __block BOOL canceled = NO;
+    [[[UIApplication sharedApplication] scheduledLocalNotifications] enumerateObjectsUsingBlock:^(UILocalNotification * _Nonnull obj, NSUInteger idx, BOOL * _Nonnull stop) {
+        if([obj.userInfo[@"messageUid"] longLongValue] == messageUid) {
+            [[UIApplication sharedApplication] cancelLocalNotification:obj];
+            *stop = YES;
+            canceled = YES;
+        }
+    }];
+    return YES;
+}
+
+- (void)jumpToLoginViewController:(BOOL)isKickedOff {
+    LaLoginVC *loginVC = [[LaLoginVC alloc] init];
+    loginVC.isKickedOff = isKickedOff;
+    loginVC.isPwdLogin = YES;
+    UINavigationController *nav = [[UINavigationController alloc] initWithRootViewController:loginVC];
+    self.window.rootViewController = nav;
+}
+
+- (void)onConnectionStatusChanged:(ConnectionStatus)status {
+    dispatch_async(dispatch_get_main_queue(), ^{
+        if (status == kConnectionStatusRejected || status == kConnectionStatusTokenIncorrect ||
+            status == kConnectionStatusSecretKeyMismatch || status == kConnectionStatusKickedoff) {
+            if(status == kConnectionStatusKickedoff) {
+                [self jumpToLoginViewController:YES];
+            }
+            
+            [[WFCCNetworkService sharedInstance] disconnect:YES clearSession:NO];
+            
+            [[NSUserDefaults standardUserDefaults] removeObjectForKey:@"savedToken"];
+            [[NSUserDefaults standardUserDefaults] removeObjectForKey:@"savedUserId"];
+            [[AppService sharedAppService] clearAppServiceAuthInfos];
+            [[NSUserDefaults standardUserDefaults] synchronize];
+            
+//            [KeyChainTool saveData:UNString(@"%.03lf", [NSDate.date timeIntervalSince1970]) withIdentifier:@"kCustomerService_TimeInterval"];
+        } else if (status == kConnectionStatusLogout) {
+            BOOL alreadyShowLoginVC = NO;
+            if([self.window.rootViewController isKindOfClass:UINavigationController.class]) {
+                UINavigationController *nav = (UINavigationController *)self.window.rootViewController;
+                if(nav.viewControllers.count == 1 && [nav.viewControllers[0] isKindOfClass:LaLoginVC.class]) {
+                    alreadyShowLoginVC = YES;
+                }
+            }
+            
+            if(!alreadyShowLoginVC) {
+                [self jumpToLoginViewController:NO];
+            }
+            
+            [[NSUserDefaults standardUserDefaults] removeObjectForKey:@"savedToken"];
+            [[NSUserDefaults standardUserDefaults] removeObjectForKey:@"savedUserId"];
+            [[AppService sharedAppService] clearAppServiceAuthInfos];
+            [[OrgService sharedOrgService] clearOrgServiceAuthInfos];
+            [[NSUserDefaults standardUserDefaults] synchronize];
+            
+            self.firstConnected = NO;
+        } else if(status == kConnectionStatusConnected) {
+            if(!self.firstConnected) {
+                self.firstConnected = YES;
+                dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(15 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
+                    [self prepardDataForShareExtension];
+                });
+                
+                [[OrgService sharedOrgService] login:^{
+                    NSLog(@"on org service login success");
+                    [[ESZQSCOrganizationCache sharedCache] loadMyOrganizationInfos];
+                } error:^(int errCode) {
+                    NSLog(@"on org service login failure");
+                }];
+            }
+        } else if(status == kConnectionStatusNotLicensed) {
+            NSLog(@"专业版IM服务没有授权或者授权过期！！！");
+            [self.window.rootViewController.view makeToast:(self->_isChinese?@"专业版IM服务没有授权或者授权过期！！！":@"Pro IM service is not authorized or expired!!") duration:3 position:CSToastPositionCenter];
+        } else if(status == kConnectionStatusTimeInconsistent) {
+            NSLog(@"服务器和客户端时间相差太大！！！");
+            [self.window.rootViewController.view makeToast:(self->_isChinese?@"服务器和客户端时间相差太大！！！":@"Server and client time difference is too big!!") duration:3 position:CSToastPositionCenter];
+        }
+    });
+}
+
+- (void)onConnectToServer:(NSString *)host ip:(NSString *)ip port:(int)port {
+    NSLog(@"connect to server %@,%@,%d", host, ip, port);
+}
+
+- (void)setupNavBar {
+    [QWERConfigManager.globalManager setSelectedTheme:ThemeType_White];
+//    [[QWERConfigManager globalManager] setupNavBar];
+    [self setupNaviTabbar];
+}
+/**
+ * navi  tabber  setup
+ */
+- (void)setupNaviTabbar {
+    [UINavigationBar.appearance setTintColor:UIColor.blackColor];
+    [UINavigationBar.appearance setBarTintColor:UIColor.whiteColor];
+    [UINavigationBar.appearance setTitleTextAttributes:@{NSForegroundColorAttributeName:UIColor.blackColor}];
+    [UIApplication sharedApplication].statusBarStyle = UIStatusBarStyleDefault;
+    [UITabBar appearance].backgroundColor = UIColor.whiteColor;
+//    [UITabBar appearance].backgroundImage = UIImage.new;
+//    [UITabBar appearance].translucent = NO;
+    if (@available(iOS 13.0, *)) {
+        self.window.overrideUserInterfaceStyle = UIUserInterfaceStyleLight;
+        UINavigationBarAppearance *navBar = [[UINavigationBarAppearance alloc] init];
+        navBar.backgroundColor = UIColor.whiteColor;
+        navBar.shadowColor = UIColor.clearColor;
+        [navBar setTitleTextAttributes:@{NSForegroundColorAttributeName:UIColor.blackColor}];
+        UINavigationBar.appearance.standardAppearance = navBar;
+        UINavigationBar.appearance.scrollEdgeAppearance = navBar;
+    }
+    
+    [[UINavigationBar appearance] setBackgroundImage:[[UIImage alloc] init] forBarMetrics:UIBarMetricsDefault];
+    [[UINavigationBar appearance] setShadowImage:[[UIImage alloc] init]];
+}
+
+- (BOOL)application:(UIApplication *)application handleOpenURL:(NSURL *)url {
+    return [self handleUrl:[url absoluteString] withNav:application.delegate.window.rootViewController.navigationController];
+}
+//NSInteger ceoxsoTimeInterval = (NSInteger)[[NSDate.date dateByAddingTimeInterval:7*24*60*60] timeIntervalSince1970];
+//_qrStr = [NSString stringWithFormat:@"%ld####wildfirechat://user/%@", ceoxsoTimeInterval, WFCCNetworkService.sharedInstance.userId];
+- (BOOL)handleUrl:(NSString *)str withNav:(UINavigationController *)navigator {
+    NSLog(@"扫码结束后==%@", str); // wildfirechat://user/9ygqmws2k
+    if ([str rangeOfString:@"wildfirechat://user" options:NSCaseInsensitiveSearch].location == 0) {
+//    if ([str rangeOfString:@"wildfirechat://user"].location != NSNotFound) {
+        // wildfirechat://user/(用户id)####(时间戳/有效期)
+        NSArray *results = [str componentsSeparatedByString:@"####"];
+        if (results.count <= 1) {
+            [SVProgressHUD showErrorWithStatus:(_isChinese?@"该二维码已过期，请重新生成":@"The QR code has expired. Please re-create it")];
+            [SVProgressHUD dismissWithDelay:1.0];
+            return YES;
+        }
+        if (results.count == 2) {
+            NSInteger ceoxsoTimeInterval = [results.lastObject integerValue];
+            NSInteger currentTimeInterval = [NSDate.date timeIntervalSince1970];
+            if (currentTimeInterval > ceoxsoTimeInterval) {
+                [SVProgressHUD showErrorWithStatus:(_isChinese?@"该二维码已过期，请重新生成":@"The QR code has expired. Please re-create it")];
+                [SVProgressHUD dismissWithDelay:1.0];
+                return YES;
+            }
+        }
+        NSURLComponents *components = [NSURLComponents componentsWithString:results.firstObject];
+        NSString *fromUserId;
+        for (NSURLQueryItem *item in components.queryItems) {
+            if([@"from" isEqualToString:item.name]) {
+                fromUserId = item.value;
+                break;
+            }
+        }
+        NSString *userId = components.path.lastPathComponent;
+//        RWADCProfileTableVC *vc2 = [[RWADCProfileTableVC alloc] init];
+//        vc2.userId = userId;
+//        vc2.sourceType = FriendSource_QrCode;
+//        vc2.sourceTargetId = fromUserId;
+//        vc2.hidesBottomBarWhenPushed = YES;
+//        [navigator pushViewController:vc2 animated:YES];
+        if (userId.length <= 0) {
+            [SVProgressHUD showErrorWithStatus:(_isChinese?@"该二维码存在问题":@"There are problems with the QR code")];
+            [SVProgressHUD dismissWithDelay:1.0];
+            return YES;
+        }
+        BOOL isMyFriend = [WFCCIMService.sharedWFCIMService isMyFriend:userId]; // 本人与本人不是好友关系
+        if (isMyFriend) { // 是好友关系
+            LaMemberInfoVC *vc = LaMemberInfoVC.new;
+            vc.hidesBottomBarWhenPushed = YES;
+            vc.userId = userId;
+            [navigator pushViewController:vc animated:YES];
+        }else { // 本人或者 非好友关系
+            LaFriendInfoVC *vc = LaFriendInfoVC.new;
+            vc.hidesBottomBarWhenPushed = YES;
+            vc.userId = userId;
+            [navigator pushViewController:vc animated:YES];
+        }
+        
+        return YES;
+    } else if ([str rangeOfString:@"wildfirechat://group" options:NSCaseInsensitiveSearch].location == 0) {
+        //wildfirechat://group/groupId?from=fromUserId
+        NSURLComponents *components = [NSURLComponents componentsWithString:str];
+        NSString *fromUserId;
+        for (NSURLQueryItem *item in components.queryItems) {
+            if([@"from" isEqualToString:item.name]) {
+                fromUserId = item.value;
+                break;
+            }
+        }
+        NSString *groupId = components.path.lastPathComponent;
+
+//        TREWQGroupInfoVC *vc2 = [[TREWQGroupInfoVC alloc] init];
+//        vc2.groupId = groupId;
+//        vc2.sourceType = GroupMemberSource_QrCode;
+//        vc2.sourceTargetId = fromUserId;
+//        vc2.hidesBottomBarWhenPushed = YES;
+//        [navigator pushViewController:vc2 animated:YES];
+        
+        LaGroupInfoQrVC *vc = LaGroupInfoQrVC.new;
+        vc.groupId = groupId;
+        vc.sourceType = GroupMemberSource_QrCode;
+        vc.hidesBottomBarWhenPushed = YES;
+        [navigator pushViewController:vc animated:YES];
+        return YES;
+    } else if ([str rangeOfString:@"wildfirechat://pcsession" options:NSCaseInsensitiveSearch].location == 0) {
+//        str = @"wildfirechat://pcsession/mysessionid?platform=3";
+        NSURL *URL = [NSURL URLWithString:str];
+        
+        NSString *sessionId = [URL lastPathComponent];
+        NSMutableDictionary *params = [[NSMutableDictionary alloc]initWithCapacity:2];
+        NSURLComponents *urlComponents = [[NSURLComponents alloc] initWithString:str];
+        [urlComponents.queryItems enumerateObjectsUsingBlock:^(NSURLQueryItem * _Nonnull obj, NSUInteger idx, BOOL * _Nonnull stop) {
+            [params setObject:obj.value forKey:obj.name];
+        }];
+        int platform = [params[@"platform"] intValue];
+        
+        
+        PCLoginConfirmViewController *vc2 = [[PCLoginConfirmViewController alloc] init];
+        vc2.sessionId = sessionId;
+        vc2.platform = platform;
+        vc2.modalPresentationStyle = UIModalPresentationFullScreen;
+        [navigator presentViewController:vc2 animated:YES completion:nil];
+        return YES;
+    }else if ([str rangeOfString:@"wildfirechat://group" options:NSCaseInsensitiveSearch].location == 0) {
+#if WFCU_SUPPORT_VOIP
+//        str = @"wildfirechat://conference/conferenceid?password=123456";
+        NSURL *URL = [NSURL URLWithString:str];
+        
+        NSString *conferenceId = [URL lastPathComponent];
+        NSMutableDictionary *params = [[NSMutableDictionary alloc] init];
+        NSURLComponents *urlComponents = [[NSURLComponents alloc] initWithString:str];
+        [urlComponents.queryItems enumerateObjectsUsingBlock:^(NSURLQueryItem * _Nonnull obj, NSUInteger idx, BOOL * _Nonnull stop) {
+            [params setObject:obj.value forKey:obj.name];
+        }];
+        NSString *password = params[@"password"];
+        
+        __weak typeof(self)ws = self;
+        __block MBProgressHUD *hud = [self startProgress:LLLLLL(@"Loading") inView:navigator.view];
+        if ([Chat86AVEngineKit sharedEngineKit].supportConference) {
+            [[QWERConfigManager globalManager].appServiceProvider queryConferenceInfo:conferenceId password:password success:^(RADCOConferenceInfo * _Nonnull conferenceInfo) {
+                [ws stopProgress:hud inView:navigator.view finishText:nil];
+                RADCOConferenceInfoVC *vc = [[RADCOConferenceInfoVC alloc] init];
+                vc.conferenceId = conferenceInfo.conferenceId;
+                vc.password = conferenceInfo.password;
+                
+                UINavigationController *nav = [[UINavigationController alloc] initWithRootViewController:vc];
+                nav.modalPresentationStyle = UIModalPresentationFullScreen;
+                [navigator presentViewController:nav animated:YES completion:nil];
+            } error:^(int errorCode, NSString * _Nonnull message) {
+                if (errorCode == 16) {
+                    [ws stopProgress:hud inView:navigator.view finishText:self->_isChinese?@"会议已结束！":@"The meeting is over!"];
+                } else {
+                    [ws stopProgress:hud inView:navigator.view finishText:LLLLLL(@"NetworkError")];
+                }
+            }];
+        } else {
+            [ws stopProgress:hud inView:navigator.view finishText:(_isChinese?@"不支持会议":@"Unsupported meeting")];
+        }
+        return YES;
+#endif
+    }else { // str = @"https://www.jianshu.com/p/662e73cb16ed"
+        
+    }
+    
+    return NO;
+}
+- (MBProgressHUD *)startProgress:(NSString *)text inView:(UIView *)view {
+    MBProgressHUD *hud = [MBProgressHUD showHUDAddedTo:view animated:YES];
+    hud.label.text = text;
+    [hud showAnimated:YES];
+    return hud;
+}
+
+- (MBProgressHUD *)stopProgress:(MBProgressHUD *)hud inView:(UIView *)view finishText:(NSString *)text {
+    [hud hideAnimated:YES];
+    if(text) {
+        hud = [MBProgressHUD showHUDAddedTo:view animated:YES];
+        hud.mode = MBProgressHUDModeText;
+        hud.label.text = text;
+        hud.offset = CGPointMake(0.f, MBProgressMaxOffset);
+        [hud hideAnimated:YES afterDelay:1.f];
+    }
+    return hud;
+}
+
+#if WFCU_SUPPORT_VOIP
+#pragma mark - WFAVEngineDelegate
+//voip 当可以使用pushkit时，如果有来电或者结束，会唤起应用，收到来电通知/电话结束通知，弹出通知。
+- (void)didReceiveCall:(WFAVCallSession *)session {
+#if !USE_CALL_KIT
+    //收到来电通知后等待200毫秒，检查session有效后再弹出通知。原因是当当前用户不在线时如果有人来电并挂断，当前用户再连接后，会出现先弹来电界面，再消失的画面。
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.2 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
+        if ([Chat86AVEngineKit sharedEngineKit].currentSession.state != kWFAVEngineStateIncomming && [Chat86AVEngineKit sharedEngineKit].currentSession.state != kWFAVEngineStateConnected && [Chat86AVEngineKit sharedEngineKit].currentSession.state != kWFAVEngineStateConnecting) {
+            return;
+        }
+        
+        UIViewController *videoVC;
+        if (session.conversation.type == Group_Type && [Chat86AVEngineKit sharedEngineKit].supportMultiCall) {
+            videoVC = [[RADCOMultiVideoVC alloc] initWithSession:session];
+        } else {
+            videoVC = [[RADCOVideoVC alloc] initWithSession:session];
+        }
+        
+        [[Chat86AVEngineKit sharedEngineKit] presentViewController:videoVC];
+        if ([UIApplication sharedApplication].applicationState == UIApplicationStateBackground) {
+            if([[WFCCIMService sharedWFCIMService] isVoipNotificationSilent]) {
+                NSLog(@"用户设置禁止voip通知，忽略来电提醒");
+                return;
+            }
+            if(self.localCallNotification) {
+                [[UIApplication sharedApplication] scheduleLocalNotification:self.localCallNotification];
+            }
+            self.localCallNotification = [[UILocalNotification alloc] init];
+            
+            self.localCallNotification.alertBody = (_isChinese?@"来电话了":@"It's a phone call...");
+            
+            WFCCUserInfo *sender = [[WFCCIMService sharedWFCIMService] getUserInfo:session.inviter refresh:NO];
+            if (sender.friendAlias || sender.displayName) {
+                if (@available(iOS 8.2, *)) {
+                    self.localCallNotification.alertTitle = sender.friendAlias.length ? sender.friendAlias : sender.displayName;
+                } else {
+                    // Fallback on earlier versions
+                }
+            }
+            // 来电的铃声
+            self.localCallNotification.soundName = @"ring.caf";
+            
+            dispatch_async(dispatch_get_main_queue(), ^{
+                [[UIApplication sharedApplication] scheduleLocalNotification:self.localCallNotification];
+            });
+        } else {
+            self.localCallNotification = nil;
+        }
+    });
+#else
+    [self.callKitManager didReceiveCall:session];
+#endif
+}
+
+- (void)shouldStartRing:(BOOL)isIncoming {
+#if !USE_CALL_KIT
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.2 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
+        if ([Chat86AVEngineKit sharedEngineKit].currentSession.state == kWFAVEngineStateIncomming || [Chat86AVEngineKit sharedEngineKit].currentSession.state == kWFAVEngineStateOutgoing) {
+            if([UIApplication sharedApplication].applicationState == UIApplicationStateBackground) {
+                if([[WFCCIMService sharedWFCIMService] isVoipNotificationSilent]) {
+                    NSLog(@"用户设置禁止voip通知，忽略来电震动");
+                    return;
+                }
+                AudioServicesAddSystemSoundCompletion(kSystemSoundID_Vibrate, NULL, NULL, systemAudioCallback, NULL);
+                AudioServicesPlaySystemSound (kSystemSoundID_Vibrate);
+            } else {
+                AVAudioSession *audioSession = [AVAudioSession sharedInstance];
+                //默认情况按静音或者锁屏键会静音
+                [audioSession setCategory:AVAudioSessionCategorySoloAmbient error:nil];
+                [audioSession setActive:YES error:nil];
+                
+                if (self.audioPlayer) {
+                    [self shouldStopRing];
+                }
+                
+                NSURL *url = [[NSBundle mainBundle] URLForResource:@"ring" withExtension:@"caf"];
+                NSError *error = nil;
+                self.audioPlayer = [[AVAudioPlayer alloc] initWithContentsOfURL:url error:&error];
+                if (!error) {
+                    self.audioPlayer.numberOfLoops = -1;
+                    self.audioPlayer.volume = 1.0;
+                    [self.audioPlayer prepareToPlay];
+                    [self.audioPlayer play];
+                }
+            }
+        }
+    });
+#endif
+}
+
+void systemAudioCallback (SystemSoundID soundID, void* clientData) {
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(1 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
+        if([UIApplication sharedApplication].applicationState == UIApplicationStateBackground) {
+            if ([Chat86AVEngineKit sharedEngineKit].currentSession.state == kWFAVEngineStateIncomming) {
+                AudioServicesPlaySystemSound(kSystemSoundID_Vibrate);
+            }
+        }
+    });
+}
+
+- (void)shouldStopRing {
+    if (self.audioPlayer) {
+        [self.audioPlayer stop];
+        self.audioPlayer = nil;
+    }
+}
+
+- (void)didCallEnded:(WFAVCallEndReason)reason duration:(int)callDuration {
+#if !USE_CALL_KIT
+    //在后台时，如果电话挂断，清除掉来电通知，如果未接听超时或者未接通对方挂掉，弹出结束本地通知。
+    if ([UIApplication sharedApplication].applicationState == UIApplicationStateBackground) {
+        if(self.localCallNotification) {
+            [[UIApplication sharedApplication] cancelLocalNotification:self.localCallNotification];
+            self.localCallNotification = nil;
+        }
+        
+        if(reason == kWFAVCallEndReasonTimeout || (reason == kWFAVCallEndReasonRemoteHangup && callDuration == 0)) {
+            UILocalNotification *callEndNotification = [[UILocalNotification alloc] init];
+            if(reason == kWFAVCallEndReasonTimeout) {
+                callEndNotification.alertBody = (_isChinese?@"来电未接听":@"Missed call");
+            } else {
+                callEndNotification.alertBody = (_isChinese?@"来电已取消":@"Call cancelled");
+            }
+            if (@available(iOS 8.2, *)) {
+                self.localCallNotification.alertTitle = (_isChinese?@"网络通话":@"Network call");
+                if([Chat86AVEngineKit sharedEngineKit].currentSession.inviter) {
+                    WFCCUserInfo *sender = [[WFCCIMService sharedWFCIMService] getUserInfo:[Chat86AVEngineKit sharedEngineKit].currentSession.inviter refresh:NO];
+                    if (sender.displayName) {
+                        self.localCallNotification.alertTitle = sender.displayName;
+                    }
+                }
+            }
+            
+            //应该播放挂断的声音
+//            self.localCallNotification.soundName = @"ring.caf";
+            [[UIApplication sharedApplication] scheduleLocalNotification:callEndNotification];
+        }
+    }
+#else
+    [self.callKitManager didCallEnded:reason duration:callDuration];
+#endif
+}
+
+- (void)didReceiveIncomingPushWithPayload:(PKPushPayload *)payload
+                                  forType:(NSString *)type {
+    NSLog(@"didReceiveIncomingPushWithPayload");
+#if USE_CALL_KIT
+    [self.callKitManager didReceiveIncomingPushWithPayload:payload forType:type];
+#endif
+}
+#endif
+
+//voip 当无法使用pushkit时，需要使用backgroup推送，在这里弹出来电通知和取消来电通知   --- 处理推送消息
+-(void)application:(UIApplication *)application didReceiveRemoteNotification:(NSDictionary *)userInfo fetchCompletionHandler:(void (^)(UIBackgroundFetchResult))completionHandler {
+    if([userInfo[@"voip"] boolValue]) {
+        if([userInfo[@"voip_type"] intValue] == 1) { //incomming call
+            NSDictionary *aps = userInfo[@"aps"];
+            if(aps && aps[@"alert"]) {
+                NSString *title = aps[@"alert"][@"title"];
+                NSString *body = aps[@"alert"][@"body"];
+                NSString *sound = aps[@"sound"];
+                
+                self.localCallNotification = [[UILocalNotification alloc] init];
+                
+                self.localCallNotification.alertBody = body;
+                if (@available(iOS 8.2, *)) {
+                    self.localCallNotification.alertTitle = title;
+                } else {
+                    // Fallback on earlier versions
+                }
+                
+                self.localCallNotification.soundName = @"ring.caf";
+                [[UIApplication sharedApplication] scheduleLocalNotification:self.localCallNotification];
+            }
+        } else if([userInfo[@"voip_type"] intValue] == 2) {
+            if(self.localCallNotification) {
+                [[UIApplication sharedApplication] cancelLocalNotification:self.localCallNotification];
+                self.localCallNotification = nil;
+            }
+            
+            NSDictionary *aps = userInfo[@"aps"];
+            if(aps && aps[@"alert"]) {
+                NSString *title = aps[@"alert"][@"title"];
+                NSString *body = aps[@"alert"][@"body"];
+                NSString *sound = aps[@"sound"];
+                UILocalNotification *callEndNotification = [[UILocalNotification alloc] init];
+                callEndNotification.alertBody = body;
+                    
+                if (@available(iOS 8.2, *)) {
+                    self.localCallNotification.alertTitle = title;
+                }
+                    
+                    //应该播放挂断的声音
+        //            self.localCallNotification.soundName = @"ring.caf";
+                [[UIApplication sharedApplication] scheduleLocalNotification:callEndNotification];
+            }
+        }
+    }
+    completionHandler(UIBackgroundFetchResultNoData);
+}
+
+#pragma mark - UNUserNotificationCenterDelegate
+//将要推送
+- (void)userNotificationCenter:(UNUserNotificationCenter *)center willPresentNotification:(UNNotification *)notification withCompletionHandler:(void (^)(UNNotificationPresentationOptions))completionHandler API_AVAILABLE(ios(10.0)){
+    NSLog(@"----------willPresentNotification");
+}
+//已经完成推送
+- (void)userNotificationCenter:(UNUserNotificationCenter *)center didReceiveNotificationResponse:(UNNotificationResponse *)response withCompletionHandler:(void (^)(void))completionHandler API_AVAILABLE(ios(10.0)){
+    NSLog(@"============didReceiveNotificationResponse");
+    NSString *categoryID = response.notification.request.content.categoryIdentifier;
+    if ([categoryID isEqualToString:@"categoryIdentifier"]) {
+        if ([response.actionIdentifier isEqualToString:@"enterApp"]) {
+            if (@available(iOS 10.0, *)) {
+                
+            } else {
+                // Fallback on earlier versions
+            }
+        }else{
+            NSLog(@"No======");
+        }
+    }
+    completionHandler();
+}
+
+
+#pragma mark - QrCodeDelegate
+- (void)showQrCodeViewController:(UINavigationController *)navigator type:(int)type target:(NSString *)target {
+//    CreateBarCodeViewController *vc = [CreateBarCodeViewController new];
+//    vc.qrType = type;
+//    vc.target = target;
+//    [navigator pushViewController:vc animated:YES];
+    LaNormalQrcodeVC *vc = LaNormalQrcodeVC.new;
+    vc.qrType = type;
+    vc.target = target;
+    [navigator pushViewController:vc animated:YES];
+}
+
+- (void)scanQrCode:(UINavigationController *)navigator {
+    LaScanQrVC *vc = [LaScanQrVC new];
+    vc.libraryType = SLT_Native;
+    vc.scanCodeType = SCT_QRCode;
+    
+    vc.style = [StyleDIY qqStyle];
+    
+    //镜头拉远拉近功能
+    vc.isVideoZoom = YES;
+    
+    vc.hidesBottomBarWhenPushed = YES;
+    __weak typeof(self)ws = self;
+    vc.scanResult = ^(NSString *str) {
+        [ws handleUrl:str withNav:navigator];
+    };
+    
+    [navigator pushViewController:vc animated:YES];
+}
+
+#ifdef WFC_PTT
+- (void)playPttRing:(NSString *)ring {
+    NSURL *url = [[NSBundle mainBundle] URLForResource:ring withExtension:@"m4a"];
+    NSError *error = nil;
+    self.audioPlayer = [[AVAudioPlayer alloc] initWithContentsOfURL:url error:&error];
+    if (!error) {
+        self.audioPlayer.numberOfLoops = 0;
+        self.audioPlayer.volume = 1.0;
+        [self.audioPlayer prepareToPlay];
+        [self.audioPlayer play];
+    }
+}
+
+#pragma - mark WFPttDelegate
+- (void)didConversation:(WFCCConversation *)conversation startTalkingUser:(NSString *)userId {
+    [self playPttRing:@"ptt_begin"];
+}
+
+- (void)didConversation:(WFCCConversation *)conversation endTalkingUser:(NSString *)userId {
+    [self playPttRing:@"ptt_end"];
+}
+- (void)didConversation:(WFCCConversation *)conversation amplitudeUpdate:(int)amplitude ofUser:(NSString *)userId {
+    NSLog(@"on ptt user %@ speak %d", userId, amplitude);
+}
+#endif
+@end
+/**
+ LAVA 一个安全的私密聊天APP.
+ 该应用将以强大的安全性加密保护您的讯息隐私，这表示着只有你的对话的好友才拥有所有聊天讯息。
+ 安全：点对点讯息加密传输，保障您的隐私
+ 自由：LAVA，让你可尽情畅聊
+ 快速：轻量、快速地传送讯息，保持高效沟通
+ */

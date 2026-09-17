@@ -1,0 +1,19 @@
+//
+//  GroupNotificationAcceptVC.h
+//  WildFireChat
+//
+//  Created by Ruby on 12/26/23.
+//  Copyright © 2023 WildFireChat. All rights reserved.
+//
+
+#import "LaMainVC.h"
+
+NS_ASSUME_NONNULL_BEGIN
+
+@interface GroupNotificationAcceptVC : LaMainVC
+
+@property (nonatomic, strong) WaitAcceptList *acceptList;
+
+@end
+
+NS_ASSUME_NONNULL_END

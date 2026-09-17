@@ -1,0 +1,18 @@
+//
+//  RADCOWaitingAnimationView.h
+//  WFChatUIKit
+//
+//  Created by Tom Lee on 2020/2/23.
+//  Copyright © 2020 WildFireChat. All rights reserved.
+//
+
+#import <UIKit/UIKit.h>
+
+NS_ASSUME_NONNULL_BEGIN
+
+@interface RADCOWaitingAnimationView : UIImageView
+- (void)start;
+- (void)stop;
+@end
+
+NS_ASSUME_NONNULL_END
