@@ -1,4 +1,11 @@
 WildFireChat.xcodeproj/project.xcworkspace/xcuserdata
 WildFireChat.xcodeproj/WFC.xcworkspace/xcuserdata
 WildFireChat.xcodeproj/xcuserdata
-Frameworks
+
+# Frameworks/ 下的第三方「源码」需要进版本库（SVProgressHUD、MJExtension 等），
+# 否则 CI clone 后 pch 找不到头文件，全量编译失败。
+# 只忽略预编译产物。
+Frameworks/**/*.framework
+Frameworks/**/*.xcframework
+Frameworks/**/*.a
+Frameworks/**/*.dylib
