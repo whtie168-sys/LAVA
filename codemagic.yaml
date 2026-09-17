@@ -51,6 +51,18 @@ workflows:
 
 
 
+      - name: Increment build number
+
+        script: |
+
+          set -e
+          LATEST=$(app-store-connect get-latest-build-number "$APP_STORE_APPLE_ID" 2>/dev/null || echo "0")
+          if [ -z "$LATEST" ]; then LATEST=0; fi
+          BUILD_NUMBER=$((LATEST + 1))
+          echo "Latest on App Store Connect: $LATEST -> using build $BUILD_NUMBER"
+          echo "BUILD_NUMBER=$BUILD_NUMBER" >> "$CM_ENV"
+
+
       - name: Build ipa for distribution
 
         script: |
@@ -58,6 +70,7 @@ workflows:
           xcode-project build-ipa \
             --workspace "$CM_BUILD_DIR/$XCODE_WORKSPACE" \
             --scheme "$XCODE_SCHEME" \
+            --archive-flags "CURRENT_PROJECT_VERSION=$BUILD_NUMBER" \
             --disable-xcpretty
 
 
